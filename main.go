@@ -4,20 +4,24 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
+	"os"
 	"time"
 )
 
 type TLSResult struct {
-	Hostname         string            `json:"hostname"`
-	TLSVersion       string            `json:"tls_version"`
-	CipherSuite      string            `json:"cipher_suite"`
-	CertificateCount int               `json:"certificate_count"`
-	HostnameValid    bool              `json:"hostname_valid"`
-	ChainTrusted     bool              `json:"chain_trusted"`
-	Certificates     []CertificateInfo `json:"certificates"`
+	Hostname           string            `json:"hostname"`
+	TLSVersion         string            `json:"tls_version"`
+	CipherSuite        string            `json:"cipher_suite"`
+	CertificateCount   int               `json:"certificate_count"`
+	HostnameValid      bool              `json:"hostname_valid"`
+	ChainTrusted       bool              `json:"chain_trusted"`
+	VerificationError  string            `json:"verification_error"`
+	VerificationReason string            `json:"verification_reason"`
+	Certificates       []CertificateInfo `json:"certificates"`
 }
 
 type CertificateInfo struct {
@@ -38,7 +42,7 @@ func main() {
 
 	if flag.NArg() != 1 {
 		fmt.Println("Usage: tlscheck [--json] <host:port>")
-		return
+		os.Exit(1)
 	}
 
 	host := flag.Arg(0)
@@ -46,7 +50,7 @@ func main() {
 	result, err := checkTLS(host)
 	if err != nil {
 		fmt.Println(err)
-		return
+		os.Exit(1)
 	}
 
 	if *jsonOutput {
@@ -93,7 +97,22 @@ func checkTLS(host string) (*TLSResult, error) {
 		result.HostnameValid = true
 	}
 
-	result.ChainTrusted = len(state.VerifiedChains) > 0
+	intermediates := x509.NewCertPool()
+	for _, cert := range state.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+
+	verificationErr := verifyCertificate(
+		state.PeerCertificates[0],
+		hostname,
+		intermediates,
+	)
+	result.ChainTrusted = verificationErr == nil
+
+	if verificationErr != nil {
+		result.VerificationError = verificationErr.Error()
+		result.VerificationReason = classifyVerificationError(verificationErr)
+	}
 
 	now := time.Now()
 
@@ -121,6 +140,61 @@ func checkTLS(host string) (*TLSResult, error) {
 		result.Certificates = append(result.Certificates, info)
 	}
 	return result, nil
+}
+
+func classifyVerificationError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	var certErr x509.CertificateInvalidError
+	if errors.As(err, &certErr) {
+		switch certErr.Reason {
+		case x509.Expired:
+			return "expired"
+
+		case x509.NotAuthorizedToSign:
+			return "not_authorized_to_sign"
+
+		case x509.IncompatibleUsage:
+			return "incompatible_usage"
+
+		case x509.CANotAuthorizedForThisName:
+			return "ca_not_authorized_for_this_name"
+
+		case x509.TooManyIntermediates:
+			return "too_many_intermediates"
+
+		case x509.NameConstraintsWithoutSANs:
+			return "name_constraints_without_sans"
+
+		default:
+			return "certificate_invalid"
+		}
+	}
+
+	var unknownAuthorityErr x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthorityErr) {
+		return "unknown_authority"
+	}
+
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &hostnameErr) {
+		return "hostname_mismatch"
+	}
+
+	return "verification_failed"
+}
+
+func verifyCertificate(cert *x509.Certificate, hostname string, intermediates *x509.CertPool) error {
+	options := x509.VerifyOptions{
+		DNSName:       hostname,
+		CurrentTime:   time.Now(),
+		Intermediates: intermediates,
+	}
+
+	_, err := cert.Verify(options)
+	return err
 }
 
 func verifyHostname(cert *x509.Certificate, hostname string) error {
