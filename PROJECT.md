@@ -61,12 +61,25 @@ Current project structure:
 
 ```text
 tlscheck/
-├── main.go
+├── main.go                            (entry point)
+├── cli.go                             (run()/runWithArgs())
+├── tls_check.go                       (checkTLS())
+├── certificate.go                     (TLSResult/CertificateInfo + cert helpers)
+├── verification.go                    (cert/hostname verification)
+├── output.go                          (printResult()/printJSON())
+├── cli_test.go
+├── check_tls_test.go
+├── tls_integration_test.go
+├── certificate_roles_test.go
+├── classify_verification_error_test.go
+├── key_usages_test.go
+├── extended_key_usages_test.go
+├── sha256_fingerprint_test.go
 ├── go.mod
 └── ...
 ```
 
-The project intentionally remains in a single `main.go` while the core Go and TLS concepts are being learned.
+The project has moved past a single `main.go`: responsibilities are now split across files, though everything is still `package main` — no `internal/` packages yet.
 
 ---
 
@@ -314,17 +327,40 @@ func verifyHostname(cert *x509.Certificate, hostname string) error {
 
 ## 12. Certificate chain trust
 
-Currently using:
+The TLS handshake now dials with `InsecureSkipVerify: true` so the connection always succeeds, and trust is instead determined explicitly and reported in detail:
 
 ```go
-result.ChainTrusted = len(state.VerifiedChains) > 0
+conf := &tls.Config{InsecureSkipVerify: true}
+
+verificationErr := verifyCertificate(
+    state.PeerCertificates[0],
+    hostname,
+    intermediates,
+)
+result.ChainTrusted = verificationErr == nil
 ```
 
-`VerifiedChains` is populated when Go successfully builds a certificate verification path using its configured trust sources.
+```go
+func verifyCertificate(cert *x509.Certificate, hostname string, intermediates *x509.CertPool) error {
+    options := x509.VerifyOptions{
+        DNSName:       hostname,
+        CurrentTime:   time.Now(),
+        Intermediates: intermediates,
+    }
 
-This is currently a basic trust indication.
+    _, err := cert.Verify(options)
+    return err
+}
+```
 
-A more explicit certificate verification implementation is planned later.
+When verification fails, both the raw error and a stable machine-readable reason are captured:
+
+```go
+result.VerificationError = verificationErr.Error()
+result.VerificationReason = classifyVerificationError(verificationErr)
+```
+
+`classifyVerificationError` maps the standard library's error types (`x509.CertificateInvalidError`, `x509.UnknownAuthorityError`, `x509.HostnameError`) to short reason codes such as `expired`, `unknown_authority`, or `hostname_mismatch`. Hostname mismatches are reported separately via `HostnameError`.
 
 ---
 
@@ -482,6 +518,78 @@ This is an important Go error-handling pattern and will be expanded throughout t
 
 ---
 
+## 19. Certificate roles (leaf / intermediate / root)
+
+Implemented `certificateRoles()`, which labels every certificate the server sent:
+
+```go
+roles := certificateRoles(state)
+```
+
+When Go successfully builds a `VerifiedChains` path, that chain is used to assign `"leaf"`, `"intermediate"`, or `"root"` accurately. When verification fails, the leaf is still known and any remaining certificates fall back to `"intermediate"`.
+
+---
+
+## 20. Additional certificate metadata
+
+`CertificateInfo` now also exposes:
+
+```go
+SerialNumber      string
+IsCA              bool
+KeyUsage          []string
+ExtendedKeyUsage  []string
+SHA256Fingerprint string
+Role              string
+```
+
+`keyUsages()` decodes the `x509.KeyUsage` bitmask, `extendedKeyUsages()` maps each `x509.ExtKeyUsage` value, and `sha256Fingerprint()` hashes `cert.Raw` for a stable certificate identifier.
+
+Still not exposed: IP/email SANs, Organization/Country, and Authority/Subject Key ID.
+
+---
+
+## 21. Connection timeout
+
+Dialing now uses a bounded `net.Dialer` instead of the unbounded `tls.Dial`:
+
+```go
+dialer := &net.Dialer{Timeout: 10 * time.Second}
+conn, err := tls.DialWithDialer(dialer, "tcp", host, conf)
+```
+
+The timeout is currently a fixed constant; a `--timeout` flag is still planned.
+
+---
+
+## 22. Proper CLI exit codes
+
+`main()` now propagates failures with a non-zero exit status:
+
+```go
+func main() {
+    if err := run(); err != nil {
+        fmt.Fprintln(os.Stderr, "Error:", err)
+        os.Exit(1)
+    }
+}
+```
+
+CLI parsing also moved to an explicit `flag.NewFlagSet("tlscheck", flag.ContinueOnError)` in `runWithArgs()`, which is easier to unit test than the package-level `flag` functions.
+
+---
+
+## 23. Automated testing
+
+The project now has a real test suite (`go test ./...`):
+
+* Table-driven unit tests for `classifyVerificationError`, `keyUsages`, `extendedKeyUsages`, `sha256Fingerprint`, and `certificateRoles`.
+* `cli_test.go` covers `runWithArgs()` argument validation (missing host, invalid address, unknown flag).
+* `check_tls_test.go` spins up a local `tls.Listen` server with a generated self-signed certificate and runs `checkTLS()` against it end-to-end, without any network dependency.
+* `tls_integration_test.go` runs `checkTLS()` against a real public host (`google.com:443`) and is skipped under `go test -short`.
+
+---
+
 # Current Architecture
 
 The current application flow is:
@@ -531,13 +639,16 @@ This avoids duplicating TLS inspection logic for human and JSON output.
 
 ```go
 type TLSResult struct {
-    Hostname         string
-    TLSVersion       string
-    CipherSuite      string
-    CertificateCount int
-    HostnameValid    bool
-    ChainTrusted     bool
-    Certificates     []CertificateInfo
+    Hostname           string
+    TLSVersion         string
+    CipherSuite        string
+    CertificateCount   int
+    HostnameValid      bool
+    ChainTrusted       bool
+    VerificationError  string
+    VerificationReason string
+    HostnameError      string
+    Certificates       []CertificateInfo
 }
 ```
 
@@ -547,13 +658,19 @@ type TLSResult struct {
 type CertificateInfo struct {
     Subject            string
     Issuer             string
+    SerialNumber       string
     ValidFrom          time.Time
     ValidUntil         time.Time
+    IsCA               bool
     PublicKeyAlgorithm string
     SignatureAlgorithm string
     DNSNames           []string
     Status             string
     DaysRemaining      float64
+    KeyUsage           []string
+    ExtendedKeyUsage   []string
+    SHA256Fingerprint  string
+    Role               string
 }
 ```
 
@@ -731,51 +848,9 @@ The following work remains.
 
 ### Status
 
-**Next**
+**Done**
 
-Currently errors are handled like:
-
-```go
-if err != nil {
-    fmt.Println(err)
-    return
-}
-```
-
-This prints the error but exits with status code `0`.
-
-For a real CLI, failures should return a non-zero exit code.
-
-Target behavior:
-
-```bash
-tlscheck google.com:443
-echo $?
-```
-
-Successful check:
-
-```text
-0
-```
-
-Failed check:
-
-```text
-1
-```
-
-This will introduce:
-
-```go
-os.Exit(1)
-```
-
-and teach:
-
-* process exit status
-* Unix CLI conventions
-* why exit codes matter in shell scripts and CI
+`main()` now checks the error returned by `run()` and calls `os.Exit(1)`; see item 22 above.
 
 ---
 
@@ -783,51 +858,9 @@ and teach:
 
 ### Status
 
-**Planned**
+**Done**
 
-Current trust detection is:
-
-```go
-len(state.VerifiedChains) > 0
-```
-
-We need to understand and eventually use:
-
-```go
-x509.VerifyOptions
-```
-
-Important concepts:
-
-* Root CA trust
-* Intermediate certificates
-* Certificate chain construction
-* System trust store
-* `DNSName`
-* `KeyUsages`
-* `Roots`
-* `Intermediates`
-* `Verify()`
-
-Target conceptual flow:
-
-```text
-Leaf certificate
-      │
-      ▼
-Intermediates
-      │
-      ▼
-Trusted Root CA
-      │
-      ▼
-x509.Verify()
-      │
-      ▼
-Verification result
-```
-
-This will make `ChainTrusted` more explicit and controllable.
+`verifyCertificate()` now calls `cert.Verify(x509.VerifyOptions{...})` explicitly with `DNSName`, `CurrentTime`, and `Intermediates`; see item 12 above.
 
 ---
 
@@ -835,28 +868,16 @@ This will make `ChainTrusted` more explicit and controllable.
 
 ### Status
 
-**Planned**
+**Partially done**
 
-Instead of only:
+`TLSResult` now reports `HostnameError`, `VerificationError`, and `VerificationReason` as separate fields instead of a single boolean. Still missing: a per-check breakdown (key usage validity, extended usage validity) rather than one combined verification reason.
 
-```text
-Hostname Valid: true
-Chain Trusted: true
-```
-
-eventually report more detailed validation information.
-
-Potential checks:
+Potential checks still to add:
 
 ```text
-Hostname:        valid
-Validity:        valid
-Chain:           trusted
 Key Usage:       valid
 Extended Usage:  valid
 ```
-
-The exact model will be designed after understanding `x509.VerifyOptions`.
 
 ---
 
@@ -864,32 +885,9 @@ The exact model will be designed after understanding `x509.VerifyOptions`.
 
 ### Status
 
-**Planned**
+**Done**
 
-Currently all `PeerCertificates` are represented similarly.
-
-We should distinguish:
-
-```text
-Certificate 1 → Leaf / Server
-Certificate 2 → Intermediate
-Certificate 3 → Root / Chain certificate
-```
-
-Potential future model:
-
-```go
-type CertificateInfo struct {
-    Position string
-    ...
-}
-```
-
-or a separate certificate type/role.
-
-Important: the certificates sent by the server and the chain Go actually verifies can differ because of trust-store path building and cross-signing.
-
-This behavior has already been observed with Google's certificate chain.
+`certificateRoles()` labels each peer certificate as `"leaf"`, `"intermediate"`, or `"root"`, using the verified chain when available; see item 19 above.
 
 ---
 
@@ -897,30 +895,18 @@ This behavior has already been observed with Google's certificate chain.
 
 ### Status
 
-**Planned**
+**Partially done**
 
-Potential fields:
+Added: Serial number, IsCA, KeyUsage, ExtKeyUsage, SHA-256 fingerprint (see item 20 above).
 
-* Serial number
-* Version
-* IsCA
-* KeyUsage
-* ExtKeyUsage
+Still missing:
+
 * IPAddresses
 * EmailAddresses
 * Organization
 * Country
-* Common Name
 * Authority Key ID
 * Subject Key ID
-* Certificate fingerprint
-
-Example fingerprint:
-
-```text
-SHA-256:
-AA:BB:CC:...
-```
 
 Only add fields that are useful to TLSCheck rather than exposing the entire `x509.Certificate`.
 
@@ -968,36 +954,9 @@ Hostname verification needs special handling for IP addresses because `VerifyHos
 
 ### Status
 
-**Planned**
+**Done**
 
-Currently:
-
-```go
-tls.Dial(...)
-```
-
-can potentially wait for a long time.
-
-Introduce:
-
-```go
-net.Dialer{
-    Timeout: ...,
-}
-```
-
-and:
-
-```go
-tls.DialWithDialer(...)
-```
-
-This will introduce useful Go concepts:
-
-* `net.Dialer`
-* timeouts
-* network reliability
-* later, `context.Context`
+`checkTLS()` now dials with `net.Dialer{Timeout: 10 * time.Second}` and `tls.DialWithDialer(...)`; see item 21 above. A configurable `--timeout` flag is still planned.
 
 Potential CLI option:
 
@@ -1044,37 +1003,11 @@ This will be an important Go-specific concept for production backend development
 
 ### Status
 
-**Planned**
+**Done (unit + integration), more coverage possible**
 
-Introduce Go's standard testing framework:
+Implemented with Go's standard `testing` package; see item 23 above. Current unit tests cover: `classifyVerificationError`, `keyUsages`, `extendedKeyUsages`, `sha256Fingerprint`, `certificateRoles`, and CLI argument validation. A local self-signed TLS server backs an end-to-end `checkTLS()` test, and a `-short`-skippable integration test hits a real host.
 
-```go
-testing
-```
-
-First unit tests should cover:
-
-* `net.SplitHostPort` handling
-* hostname verification
-* certificate status calculation
-* days remaining
-* JSON serialization
-* argument validation
-
-Then integration tests can test real TLS endpoints where appropriate.
-
-Expected files:
-
-```text
-main_test.go
-```
-
-Later:
-
-```text
-internal/checker/checker_test.go
-internal/cert/certificate_test.go
-```
+Still worth adding: tests for `certificateInfo()` status/day-remaining calculation and `printJSON()` serialization.
 
 ---
 
@@ -1082,7 +1015,9 @@ internal/cert/certificate_test.go
 
 ### Status
 
-**Planned after core functionality**
+**Partially done**
+
+`main.go` has been split into `cli.go`, `tls_check.go`, `certificate.go`, `verification.go`, and `output.go`, each with one responsibility — but all of them remain `package main`. Moving to `internal/` sub-packages is still planned.
 
 Once the TLS functionality is stable, move away from one large `main.go`.
 
@@ -1486,16 +1421,13 @@ The TLS checker should not contain terminal formatting logic.
 # Current Known Limitations
 
 * Only one target is supported.
-* The target currently needs `host:port`.
-* No configurable timeout.
-* Certificate trust reporting is currently based on `VerifiedChains`.
-* Certificate validation details are not yet fully exposed.
-* No unit/integration tests yet.
-* Everything is still in `main.go`.
+* The target currently needs `host:port` (no default port, no IP/IPv6 shorthand).
+* No configurable timeout (fixed at 10s).
+* Certificate validation is reported per-check (`HostnameValid`, `ChainTrusted`, `VerificationReason`) but not broken down by key usage/extended usage.
+* Still `package main` — not yet split into `internal/` packages.
 * No Docker image.
 * No CI pipeline.
 * No release automation.
-* CLI exit codes are not yet implemented.
 * JSON schema is not yet considered a stable public contract.
 
 ---
@@ -1504,7 +1436,7 @@ The TLS checker should not contain terminal formatting logic.
 
 ## Milestone 1 — Basic TLS Inspector
 
-**Status:** Mostly complete
+**Status:** Complete
 
 Implemented:
 
@@ -1533,23 +1465,21 @@ Implemented:
 
 Next:
 
-* Exit codes
-* Explicit certificate verification with `x509.VerifyOptions`
-* More detailed verification results
-* Better chain representation
-* Connection timeout
+* Configurable timeout flag
+* Default port / IP handling
+* Context cancellation
+* Move to `internal/` packages
 
 ## Milestone 2 — Reliable TLS Analyzer
 
-* Explicit certificate verification
-* Detailed validation errors
-* Hostname/IP handling
-* Connection timeout
-* Context cancellation
-* Better structured errors
-* More certificate metadata
-* Unit tests
-* Integration tests
+* Explicit certificate verification — **done**
+* Detailed validation errors (`VerificationReason`, `HostnameError`) — **done**
+* Connection timeout — **done** (fixed 10s; configurable flag still planned)
+* Unit tests — **done**
+* Integration tests — **done** (local TLS server + real host)
+* Hostname/IP handling — planned
+* Context cancellation — planned
+* More certificate metadata (IP/email SANs, Organization, Country, key IDs) — planned
 
 ## Milestone 3 — Production CLI
 
