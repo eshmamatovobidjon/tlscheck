@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -49,7 +50,7 @@ func main() {
 		return
 	}
 
-	printResult(result)
+	printJSON(result)
 }
 
 func checkTLS(host string) (*TLSResult, error) {
@@ -141,4 +142,13 @@ func printResult(result *TLSResult) {
 		fmt.Printf(" Status: %s\n", cert.Status)
 		fmt.Printf(" Days Remaining: %.0f\n", cert.DaysRemaining)
 	}
+}
+
+func printJSON(result *TLSResult) {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(string(data))
 }
