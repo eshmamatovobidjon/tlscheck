@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"os"
@@ -47,29 +48,11 @@ func main() {
 		fmt.Println("\nConnected to " + host)
 		fmt.Printf("Certificate Chain\n")
 
+		now := time.Now()
+
 		for i, cert := range certificates {
 			fmt.Printf("\nCertificate %d\n", i+1)
-
-			fmt.Printf(" Subject: %s\n", cert.Subject)
-			fmt.Printf(" Issuer: %s\n", cert.Issuer)
-			fmt.Printf(" Valid From: %s\n", cert.NotBefore)
-			fmt.Printf(" Valid Until: %s\n", cert.NotAfter)
-			fmt.Printf(" Public Key Algorithm: %s\n", cert.PublicKeyAlgorithm)
-			fmt.Printf(" Signature Algorithm: %s\n", cert.SignatureAlgorithm)
-			fmt.Printf(" DNS Names: %v\n", cert.DNSNames)
-
-			now := time.Now()
-
-			if now.Before(cert.NotBefore) {
-				fmt.Println(" Status: Not yet valid")
-			} else if now.After(cert.NotAfter) {
-				fmt.Println(" Status: Expired")
-			} else {
-				fmt.Println(" Status: Valid")
-			}
-
-			fmt.Printf(" Days Remaining: %.0f\n",
-				time.Until(cert.NotAfter).Hours()/24)
+			printCertificate(cert, now)
 		}
 
 		certificate := certificates[0]
@@ -94,4 +77,25 @@ func main() {
 			}
 		}
 	}
+}
+
+func printCertificate(cert *x509.Certificate, now time.Time) {
+	fmt.Printf(" Subject: %s\n", cert.Subject)
+	fmt.Printf(" Issuer: %s\n", cert.Issuer)
+	fmt.Printf(" Valid From: %s\n", cert.NotBefore)
+	fmt.Printf(" Valid Until: %s\n", cert.NotAfter)
+	fmt.Printf(" Public Key Algorithm: %s\n", cert.PublicKeyAlgorithm)
+	fmt.Printf(" Signature Algorithm: %s\n", cert.SignatureAlgorithm)
+	fmt.Printf(" DNS Names: %v\n", cert.DNSNames)
+
+	if now.Before(cert.NotBefore) {
+		fmt.Println(" Status: Not yet valid")
+	} else if now.After(cert.NotAfter) {
+		fmt.Println(" Status: Expired")
+	} else {
+		fmt.Println(" Status: Valid")
+	}
+
+	remaining := cert.NotAfter.Sub(now)
+	fmt.Printf(" Days Remaining: %.0f\n", remaining.Hours()/24)
 }
