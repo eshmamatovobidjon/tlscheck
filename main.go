@@ -4,9 +4,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
-	"os"
 	"time"
 )
 
@@ -33,16 +33,15 @@ type CertificateInfo struct {
 }
 
 func main() {
-	fmt.Println("TLSCheck")
+	jsonOutput := flag.Bool("json", false, "output result as JSON")
+	flag.Parse()
 
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: tlscheck <host:port>")
+	if flag.NArg() != 1 {
+		fmt.Println("Usage: tlscheck [--json] <host:port>")
 		return
 	}
 
-	host := os.Args[1]
-
-	fmt.Println("Checking " + host + "\n")
+	host := flag.Arg(0)
 
 	result, err := checkTLS(host)
 	if err != nil {
@@ -50,7 +49,16 @@ func main() {
 		return
 	}
 
-	printJSON(result)
+	if *jsonOutput {
+		if err := printJSON(result); err != nil {
+			fmt.Println(err)
+			return
+		}
+	} else {
+		fmt.Println("TLSCheck")
+		fmt.Println("Checking " + host + "\n")
+		printResult(result)
+	}
 }
 
 func checkTLS(host string) (*TLSResult, error) {
@@ -144,11 +152,11 @@ func printResult(result *TLSResult) {
 	}
 }
 
-func printJSON(result *TLSResult) {
+func printJSON(result *TLSResult) error {
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	fmt.Println(string(data))
+	return nil
 }
