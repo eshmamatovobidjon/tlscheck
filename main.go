@@ -10,23 +10,25 @@ import (
 )
 
 type TLSResult struct {
-	Hostname         string
-	TLSVersion       string
-	CipherSuite      string
-	CertificateCount int
-	HostnameValid    bool
-	ChainTrusted     bool
-	Certificates     []CertificateInfo
+	Hostname         string            `json:"hostname"`
+	TLSVersion       string            `json:"tls_version"`
+	CipherSuite      string            `json:"cipher_suite"`
+	CertificateCount int               `json:"certificate_count"`
+	HostnameValid    bool              `json:"hostname_valid"`
+	ChainTrusted     bool              `json:"chain_trusted"`
+	Certificates     []CertificateInfo `json:"certificates"`
 }
 
 type CertificateInfo struct {
-	Subject            string
-	Issuer             string
-	ValidFrom          time.Time
-	ValidUntil         time.Time
-	PublicKeyAlgorithm string
-	SignatureAlgorithm string
-	DNSNames           []string
+	Subject            string    `json:"subject"`
+	Issuer             string    `json:"issuer"`
+	ValidFrom          time.Time `json:"valid_from"`
+	ValidUntil         time.Time `json:"valid_until"`
+	PublicKeyAlgorithm string    `json:"public_key_algorithm"`
+	SignatureAlgorithm string    `json:"signature_algorithm"`
+	DNSNames           []string  `json:"dns_names"`
+	Status             string    `json:"status"`
+	DaysRemaining      float64   `json:"days_remaining"`
 }
 
 func main() {
@@ -47,26 +49,7 @@ func main() {
 		return
 	}
 
-	fmt.Println("TLS Connection")
-	fmt.Printf(" Hostname: %s\n", result.Hostname)
-	fmt.Printf(" TLS Version: %s\n", result.TLSVersion)
-	fmt.Printf(" Cipher Suite: %s\n", result.CipherSuite)
-	fmt.Printf(" Certificates: %d\n", result.CertificateCount)
-	fmt.Printf(" Hostname Valid: %t\n", result.HostnameValid)
-	fmt.Printf(" Chain Trusted: %t\n", result.ChainTrusted)
-
-	fmt.Println("\nCertificate Chain")
-
-	for i, cert := range result.Certificates {
-		fmt.Printf("\nCertificate %d\n", i+1)
-		fmt.Printf(" Subject: %s\n", cert.Subject)
-		fmt.Printf(" Issuer: %s\n", cert.Issuer)
-		fmt.Printf(" Valid From: %s\n", cert.ValidFrom)
-		fmt.Printf(" Valid Until: %s\n", cert.ValidUntil)
-		fmt.Printf(" Public Key Algorithm: %s\n", cert.PublicKeyAlgorithm)
-		fmt.Printf(" Signature Algorithm: %s\n", cert.SignatureAlgorithm)
-		fmt.Printf(" DNS Names: %v\n", cert.DNSNames)
-	}
+	printResult(result)
 }
 
 func checkTLS(host string) (*TLSResult, error) {
@@ -103,6 +86,8 @@ func checkTLS(host string) (*TLSResult, error) {
 
 	result.ChainTrusted = len(state.VerifiedChains) > 0
 
+	now := time.Now()
+
 	for _, cert := range state.PeerCertificates {
 		info := CertificateInfo{
 			Subject:            cert.Subject.String(),
@@ -113,6 +98,17 @@ func checkTLS(host string) (*TLSResult, error) {
 			SignatureAlgorithm: cert.SignatureAlgorithm.String(),
 			DNSNames:           cert.DNSNames,
 		}
+
+		if now.Before(cert.NotBefore) {
+			info.Status = "Not yet valid"
+		} else if now.After(cert.NotAfter) {
+			info.Status = "Expired"
+		} else {
+			info.Status = "Valid"
+		}
+
+		remaining := cert.NotAfter.Sub(now)
+		info.DaysRemaining = remaining.Hours() / 24
 		result.Certificates = append(result.Certificates, info)
 	}
 	return result, nil
@@ -122,23 +118,27 @@ func verifyHostname(cert *x509.Certificate, hostname string) error {
 	return cert.VerifyHostname(hostname)
 }
 
-func printCertificate(cert *x509.Certificate, now time.Time) {
-	fmt.Printf(" Subject: %s\n", cert.Subject)
-	fmt.Printf(" Issuer: %s\n", cert.Issuer)
-	fmt.Printf(" Valid From: %s\n", cert.NotBefore)
-	fmt.Printf(" Valid Until: %s\n", cert.NotAfter)
-	fmt.Printf(" Public Key Algorithm: %s\n", cert.PublicKeyAlgorithm)
-	fmt.Printf(" Signature Algorithm: %s\n", cert.SignatureAlgorithm)
-	fmt.Printf(" DNS Names: %v\n", cert.DNSNames)
+func printResult(result *TLSResult) {
+	fmt.Println("TLS Connection")
+	fmt.Printf(" Hostname: %s\n", result.Hostname)
+	fmt.Printf(" TLS Version: %s\n", result.TLSVersion)
+	fmt.Printf(" Cipher Suite: %s\n", result.CipherSuite)
+	fmt.Printf(" Certificates: %d\n", result.CertificateCount)
+	fmt.Printf(" Hostname Valid: %t\n", result.HostnameValid)
+	fmt.Printf(" Chain Trusted: %t\n", result.ChainTrusted)
 
-	if now.Before(cert.NotBefore) {
-		fmt.Println(" Status: Not yet valid")
-	} else if now.After(cert.NotAfter) {
-		fmt.Println(" Status: Expired")
-	} else {
-		fmt.Println(" Status: Valid")
+	fmt.Println("\nCertificate Chain")
+
+	for i, cert := range result.Certificates {
+		fmt.Printf("\nCertificate %d\n", i+1)
+		fmt.Printf(" Subject: %s\n", cert.Subject)
+		fmt.Printf(" Issuer: %s\n", cert.Issuer)
+		fmt.Printf(" Valid From: %s\n", cert.ValidFrom)
+		fmt.Printf(" Valid Until: %s\n", cert.ValidUntil)
+		fmt.Printf(" Public Key Algorithm: %s\n", cert.PublicKeyAlgorithm)
+		fmt.Printf(" Signature Algorithm: %s\n", cert.SignatureAlgorithm)
+		fmt.Printf(" DNS Names: %v\n", cert.DNSNames)
+		fmt.Printf(" Status: %s\n", cert.Status)
+		fmt.Printf(" Days Remaining: %.0f\n", cert.DaysRemaining)
 	}
-
-	remaining := cert.NotAfter.Sub(now)
-	fmt.Printf(" Days Remaining: %.0f\n", remaining.Hours()/24)
 }
