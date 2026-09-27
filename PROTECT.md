@@ -38,3 +38,51 @@ None
 - defer
 - goroutines
 - channels
+
+Phase 1
+TCP/TLS connection
+↓
+ConnectionState
+↓
+TLS version / cipher / server name
+
+Phase 2
+x509.Certificate
+↓
+Subject / Issuer / SAN
+↓
+validity dates
+
+Phase 3
+Certificate chain
+↓
+leaf → intermediate → root
+
+Phase 4
+Verification
+↓
+hostname
+expiration
+trusted CA
+key usage
+
+Phase 5
+CLI design
+↓
+tlscheck google.com:443
+tlscheck example.com:443 --json
+tlscheck example.com:443 --verbose
+
+Phase 6
+Better architecture
+↓
+cmd/
+internal/
+packages
+tests
+
+Phase 7
+Docker + CI
+↓
+GitHub Actions
+Docker image
